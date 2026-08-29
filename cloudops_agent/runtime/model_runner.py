@@ -126,6 +126,16 @@ class ModelRunner:
 
             message = choices[0].message
             content = getattr(message, "content", None)
+            tool_calls = getattr(message, "tool_calls", None)
+
+            # Some OpenAI-compatible servers (observed with gpt-oss served via
+            # Ollama and vLLM) auto-detect function-call-shaped completions and
+            # move them into the native `tool_calls` field, leaving `content`
+            # empty -- even though this benchmark never sends a `tools=`
+            # schema. Rebuild the plain-text "Thought/Action/Action Input"
+            # form so the regex-based OutputParser can still consume it.
+            if not content and tool_calls:
+                return self._render_tool_calls_as_react(message, tool_calls)
 
             if content is None:
                 raise ValueError("Response message content is None.")
@@ -137,3 +147,23 @@ class ModelRunner:
 
         except Exception as e:
             raise RuntimeError(f"Failed to extract model text: {e}") from e
+
+    def _render_tool_calls_as_react(self, message: Any, tool_calls: Any) -> str:
+        """
+        Reconstruct a "Thought:/Action:/Action Input:" string from a native
+        `tool_calls` response so it matches what OutputParser expects.
+        """
+        call = tool_calls[0]
+        function = getattr(call, "function", None)
+        name = getattr(function, "name", None) or ""
+        arguments = getattr(function, "arguments", None) or "{}"
+
+        thought = getattr(message, "reasoning_content", None) or ""
+        thought = thought.strip()
+
+        lines = []
+        if thought:
+            lines.append(f"Thought: {thought}")
+        lines.append(f"Action: {name}")
+        lines.append(f"Action Input: {arguments}")
+        return "\n".join(lines)
