@@ -1,3 +1,5 @@
+import re
+
 VALID_NODES = ["master", "worker-01", "worker-02", "worker-03"]
 
 SYSTEM_VALID_SERVICES = {
@@ -124,6 +126,27 @@ root_cause_list_str = """
 - code_missing_parameter (Requires Target: APP): application code omits a required parameter in a call/request
 - code_wrong_argument_order (Requires Target: APP): application code passes arguments in the wrong order
 """
+
+_ROOT_CAUSE_LINE_RE = re.compile(
+    r"^-\s*(?P<code>\S+)\s*\(Requires Target:\s*(?P<target>\w+)\)\s*:\s*(?P<description>.+)$"
+)
+
+
+def parse_root_cause_taxonomy(text: str = root_cause_list_str) -> list[dict]:
+    """
+    Derive structured {code, target, description} entries from the prose
+    root-cause list above. This keeps the taxonomy defined in exactly one
+    place (the text block itself) while still exposing it as data for
+    anything that needs to build a prompt/schema programmatically instead of
+    copy-pasting the English text (see runtime/task_spec_builder.py).
+    """
+    taxonomy: list[dict] = []
+    for line in text.strip("\n").splitlines():
+        match = _ROOT_CAUSE_LINE_RE.match(line.strip())
+        if match:
+            taxonomy.append(match.groupdict())
+    return taxonomy
+
 
 def build_expected_output(system: str = "train-ticket") -> str:
     system_key = system if system in SYSTEM_VALID_SERVICES else "train-ticket"

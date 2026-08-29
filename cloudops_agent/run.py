@@ -17,17 +17,11 @@ if str(AGENT_ROOT) not in sys.path:
 # Project-local imports
 # -------------------------------------------------------------------
 from prompts.config_utils import load_config
-from prompts.RCA_candidate import agent_prompt, build_expected_output
 from tools.definition import create_k8s_tools
-from tools.registry import build_tool_registry, render_tools_description
 
-from runtime.state import init_case_state
-from runtime.prompt_builder import PromptBuilder
-from runtime.model_runner import ModelRunner
-from runtime.output_parser import OutputParser
-from runtime.tool_executor import ToolExecutor
-from runtime.logger import TraceLogger
-from runtime.agent_runtime import AgentRuntime
+from runtime.backend_types import CaseResult, TaskSpec
+from runtime.backends import BACKENDS
+from runtime.task_spec_builder import build_task_spec
 
 MAX_CASES_TO_RUN = 50
 DEFAULT_DATASET_ROOT = Path("/root/k8srca/Cloud-OpsBench_history")
@@ -79,21 +73,6 @@ def is_completed_trace(trace_path: Path) -> bool:
     return trace.get("stop_reason") in {"final_answer", "max_steps"}
 
 
-def build_model_runner(llm_conf: Dict[str, Any]) -> ModelRunner:
-    """
-    Construct ModelRunner from project config.
-    """
-    return ModelRunner(
-        model_name=llm_conf["model"],
-        provider="openai_compatible",
-        api_base=llm_conf["api_base"],
-        api_key=llm_conf["api_key"],
-        temperature=llm_conf.get("temperature", 0.0),
-        max_tokens=llm_conf.get("max_tokens", 1024),
-        timeout=llm_conf.get("timeout"),
-    )
-
-
 def resolve_case_names(fault_root: Path, diag_conf: Dict[str, Any]) -> List[str]:
     """
     Resolve case names from config.
@@ -121,6 +100,46 @@ def resolve_case_names(fault_root: Path, diag_conf: Dict[str, Any]) -> List[str]
     return case_names
 
 
+def write_trace_file(trace_path: Path, task: TaskSpec, result: CaseResult, extra_meta: Dict[str, Any]) -> None:
+    """
+    Persist one case's trace in the same shape evaluation.py already reads,
+    no matter which backend produced it.
+
+    - If the backend already has a full legacy trace (e.g. the single-agent
+      runtime, which writes its own file incrementally as it runs), reuse it
+      as-is and just fold in the run-level bookkeeping (model name, ground
+      truth, etc.).
+    - Otherwise, assemble the trace from TaskSpec.trace - every tool call any
+      agent made, captured automatically, regardless of framework.
+    """
+    if result.raw_trace is not None:
+        payload = dict(result.raw_trace)
+        payload["metadata"] = {**payload.get("metadata", {}), **extra_meta}
+    else:
+        full_question = (
+            f"The Kubernetes environment in namespace `{task.namespace}` is experiencing a fault. "
+            f"A high-level symptom has been reported: '{task.symptom}'. "
+            f"Diagnose the root cause of this incident."
+        )
+        payload = {
+            "case_id": task.case_id,
+            "system_name": extra_meta.get("fault_category"),
+            "question": full_question,
+            "case_path": extra_meta.get("case_path"),
+            "max_steps": task.max_tool_calls,
+            "current_step": len(task.trace.records),
+            "finished": result.finished,
+            "final_answer": result.final_answer.model_dump_json() if result.final_answer else None,
+            "stop_reason": result.stop_reason,
+            "metadata": extra_meta,
+            "steps": task.trace.as_steps(),
+        }
+
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(trace_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def run_single_case(
     case_name: str,
     workspace_path: str,
@@ -129,15 +148,16 @@ def run_single_case(
     model_name: str,
     max_iterations: int,
     llm_conf: Dict[str, Any],
+    backend_name: str,
 ) -> None:
     """
-    Run one single case end-to-end.
+    Run one single case end-to-end, through whichever backend implements
+    AgentBackend.solve_case(TaskSpec) -> CaseResult.
     """
     # -------------------------------------------------------------------
     # 1. Resolve paths
     # -------------------------------------------------------------------
-    # fault_root = Path(workspace_path) / "benchmark" / fault_category
-    fault_root = Path(workspace_path)/ fault_category
+    fault_root = Path(workspace_path) / fault_category
     case_path = fault_root / case_name
     meta_path = case_path / "metadata.json"
 
@@ -167,16 +187,7 @@ def run_single_case(
     result = metadata_data.get("result", "")
 
     # -------------------------------------------------------------------
-    # 3. Build question
-    # -------------------------------------------------------------------
-    full_question = (
-        f"The Kubernetes environment in namespace `{namespace}` is experiencing a fault. "
-        f"A high-level symptom has been reported: '{query}'. "
-        f"Diagnose the root cause of this incident."
-    )
-
-    # -------------------------------------------------------------------
-    # 4. Initialize tools
+    # 3. Build the tools + the structured TaskSpec handed to the backend
     # -------------------------------------------------------------------
     benchmark_system = "train-ticket" if namespace == "train-ticket" else "boutique"
     tools_list = create_k8s_tools(
@@ -184,42 +195,15 @@ def run_single_case(
         system=benchmark_system,
         fault_category=fault_category,
     )
-    tool_registry = build_tool_registry(tools_list)
-    tools_description = render_tools_description(tool_registry)
 
-    # -------------------------------------------------------------------
-    # 5. Initialize runtime components
-    # -------------------------------------------------------------------
-    prompt_builder = PromptBuilder(
-        tools_description=tools_description,
-        backstory_prompt=agent_prompt,
-        expected_output=build_expected_output(benchmark_system),
-    )
-    model_runner = build_model_runner(llm_conf)
-    output_parser = OutputParser()
-    tool_executor = ToolExecutor(tool_registry=tool_registry)
-    trace_logger = TraceLogger(trace_dir=trace_dir)
-
-    runtime = AgentRuntime(
-        prompt_builder=prompt_builder,
-        model_runner=model_runner,
-        output_parser=output_parser,
-        tool_executor=tool_executor,
-        trace_logger=trace_logger,
-    )
-
-    # -------------------------------------------------------------------
-    # 6. Initialize case state
-    # -------------------------------------------------------------------
-    state = init_case_state(
+    task = build_task_spec(
+        tools_list=tools_list,
         case_id=case_name,
-        system_name=fault_category,
-        question=full_question,
-        case_path=str(case_path),
-        max_steps=max_iterations,
+        system=benchmark_system,
+        namespace=namespace,
+        symptom=query,
+        max_tool_calls=max_iterations,
         metadata={
-            "namespace": namespace,
-            "query": query,
             "result": result,
             "fault_category": fault_category,
             "model_name": model_name,
@@ -228,29 +212,48 @@ def run_single_case(
     )
 
     # -------------------------------------------------------------------
-    # 7. Run one case
+    # 4. Run the case through the selected backend
     # -------------------------------------------------------------------
-    final_state = runtime.run_case(state)
+    backend_cls = BACKENDS[backend_name]
+    backend = backend_cls(llm_conf=llm_conf, trace_dir=trace_dir)
+    case_result = backend.solve_case(task)
 
     # -------------------------------------------------------------------
-    # 8. Print summary
+    # 5. Persist trace + print summary
     # -------------------------------------------------------------------
-    trace_path = trace_logger.get_trace_path(final_state)
+    write_trace_file(
+        trace_path=trace_path,
+        task=task,
+        result=case_result,
+        extra_meta={
+            "namespace": namespace,
+            "query": query,
+            "result": result,
+            "fault_category": fault_category,
+            "model_name": model_name,
+            "backend": backend_name,
+            "case_path": str(case_path),
+        },
+    )
 
     print("=" * 80)
-    print("Cloud-OpsBench Single-Agent ReAct Runtime")
+    print("Cloud-OpsBench Multi-Backend Runtime")
     print("=" * 80)
     print(f"Model         : {model_name}")
+    print(f"Backend       : {backend_name}")
     print(f"Fault Category: {fault_category}")
     print(f"Case Name     : {case_name}")
     print(f"Case Path     : {case_path}")
-    print(f"Finished      : {final_state.finished}")
-    print(f"Stop Reason   : {final_state.stop_reason}")
-    print(f"Steps Used    : {len(final_state.history)}")
+    print(f"Finished      : {case_result.finished}")
+    print(f"Stop Reason   : {case_result.stop_reason}")
+    print(f"Tool Calls    : {len(task.trace.records)}")
     print(f"Trace Path    : {trace_path}")
     print("-" * 80)
     print("Final Answer:")
-    print(final_state.final_answer or "[No final answer produced]")
+    if case_result.final_answer:
+        print(case_result.final_answer.model_dump_json(indent=2))
+    else:
+        print("[No final answer produced]")
     print("=" * 80)
 
 
@@ -268,6 +271,11 @@ def main() -> None:
     save_path = resolve_save_path(diag_conf, normalized_system)
     fault_category = diag_conf["fault_category"]
     max_iterations = diag_conf["max_iterations"]
+    backend_name = str(diag_conf.get("backend", "react_single_agent")).strip() or "react_single_agent"
+    if backend_name not in BACKENDS:
+        raise ValueError(
+            f"Unknown diagnosis.backend '{backend_name}'. Available: {sorted(BACKENDS)}"
+        )
 
     # fault_root = Path(workspace_path) / "benchmark" / fault_category
     fault_root = workspace_path / fault_category
@@ -282,6 +290,7 @@ def main() -> None:
 
     print("✅ Configuration loading completed")
     print(f"Model          : {model_name}")
+    print(f"Backend        : {backend_name}")
     print(f"Fault category : {fault_category}")
     print(f"Workspace path : {workspace_path}")
     print(f"Save path      : {save_path}")
@@ -304,6 +313,7 @@ def main() -> None:
                 model_name=model_name,
                 max_iterations=max_iterations,
                 llm_conf=llm_conf,
+                backend_name=backend_name,
             )
         except Exception as e:
             print(f"[ERROR] case={case_name} failed: {e}")

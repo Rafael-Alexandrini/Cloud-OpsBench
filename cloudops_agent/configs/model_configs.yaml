@@ -8,6 +8,7 @@ model:
   timeout: 60
 
 diagnosis:
+  backend: "react_single_agent" # ["react_single_agent","two_agent_demo"] - see cloudops_agent/runtime/backends
   max_iterations: 20
   system: "boutique" # ["trainticket","boutique"]
   fault_category: "codedefect" # ["service",'admission','startup','runtime','performance','scheduling','infrastructure','codedefect']
