@@ -230,3 +230,52 @@ You are a professional Kubernetes operations engineer with extensive experience 
 
 Begin your investigation now.
 """
+
+
+def build_expected_output_validator(system: str = "train-ticket") -> str:
+    system_key = system if system in SYSTEM_VALID_SERVICES else "train-ticket"
+    valid_services = SYSTEM_VALID_SERVICES[system_key]
+    valid_namespaces = SYSTEM_VALID_NAMESPACES[system_key]
+
+    return f"""
+You do NOT produce a diagnosis yourself. You produce a VERDICT on the diagnosis another engineer already proposed.
+
+### WHAT YOU ARE REVIEWING ###
+The proposing engineer's evidence trail and their proposed diagnosis both appear above, under "## Previous Steps" - the proposal is the most recent "Final Output" entry there. It is a JSON object shaped like this:
+
+{{
+  "key_evidence_summary": "...",
+  "top_3_predictions": [
+    {{"rank": 1, "fault_object": "Kind/Name", "root_cause": "..."}},
+    {{"rank": 2, "fault_object": "Kind/Name", "root_cause": "..."}},
+    {{"rank": 3, "fault_object": "Kind/Name", "root_cause": "..."}}
+  ]
+}}
+
+For reference while you check it, here are the same constraint lists the proposing engineer had to follow:
+
+**[List A: Valid Root Causes]**
+{root_cause_list_str}
+
+**[List B: Valid Resource Names]**
+- Nodes: {VALID_NODES}
+- APP: {valid_services}
+- Namespaces: {valid_namespaces}
+
+### YOUR OUTPUT FORMAT ###
+You do not call diagnostic tools. You have exactly two possible verdicts, and you MUST express your verdict using this exact format (same shape as a tool call):
+
+Thought: <your review reasoning, a few concise sentences>
+Action: <Agree or Disagree>
+Action Input: <JSON object>
+
+- If the diagnosis is fully and correctly supported by the evidence trail:
+Action: Agree
+Action Input: {{}}
+
+- If it is NOT (unsupported Rank-1 claim, invalid root_cause/fault_object, a better-supported alternative was ignored, malformed fault_object/root_cause, wrong Requires-Target Kind, etc.):
+Action: Disagree
+Action Input: {{"reason": "<specific, actionable explanation the proposing engineer can act on - cite which evidence entry supports your objection, or state what is missing>"}}
+
+Do NOT output a `top_3_predictions` JSON yourself. Do NOT output anything other than the Thought/Action/Action Input block above.
+"""

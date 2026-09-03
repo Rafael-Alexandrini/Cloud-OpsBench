@@ -17,17 +17,19 @@ if str(AGENT_ROOT) not in sys.path:
 # Project-local imports
 # -------------------------------------------------------------------
 from prompts.config_utils import load_config
-from prompts.RCA_candidate import agent_prompt, build_expected_output
+from prompts.RCA_candidate import agent_prompt, build_expected_output, build_expected_output_validator
 from tools.definition import create_k8s_tools
 from tools.registry import build_tool_registry, render_tools_description
 
 from runtime.state import init_case_state
 from runtime.prompt_builder import PromptBuilder
+from runtime.double_prompt_builder import DoublePromptBuilder
 from runtime.model_runner import ModelRunner
 from runtime.output_parser import OutputParser
 from runtime.tool_executor import ToolExecutor
 from runtime.logger import TraceLogger
 from runtime.agent_runtime import AgentRuntime
+from runtime.double_agent_runtime import DoubleAgentRuntime
 
 MAX_CASES_TO_RUN = 50
 DEFAULT_DATASET_ROOT = Path("/root/k8srca/Cloud-OpsBench_history")
@@ -190,17 +192,18 @@ def run_single_case(
     # -------------------------------------------------------------------
     # 5. Initialize runtime components
     # -------------------------------------------------------------------
-    prompt_builder = PromptBuilder(
+    prompt_builder = DoublePromptBuilder(
         tools_description=tools_description,
         backstory_prompt=agent_prompt,
         expected_output=build_expected_output(benchmark_system),
+        expected_output_validator=build_expected_output_validator(benchmark_system)
     )
     model_runner = build_model_runner(llm_conf)
     output_parser = OutputParser()
     tool_executor = ToolExecutor(tool_registry=tool_registry)
     trace_logger = TraceLogger(trace_dir=trace_dir)
 
-    runtime = AgentRuntime(
+    runtime = DoubleAgentRuntime(
         prompt_builder=prompt_builder,
         model_runner=model_runner,
         output_parser=output_parser,
