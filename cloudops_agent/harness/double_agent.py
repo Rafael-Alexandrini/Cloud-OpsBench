@@ -18,6 +18,7 @@ class DoubleAgentHarness:
         self.tool_executor = tool_executor
         self.trace_logger = trace_logger
         self.hooks = hooks or HarnessHooks()
+        self.diagnostic_answer = ""
         self.verifier_answer = ""
 
     def run_case(self, state: CaseState) -> CaseState:
@@ -28,77 +29,37 @@ class DoubleAgentHarness:
             state.history.append(step)
             state.current_step += 1
             self.trace_logger.save_case_state(state)
-            if step.action_type == "submit_internal" and not step.error:
-                # If calling the verifier agent would exceed the max number of steps 
-                # If the Diagnostic Agent could not get a turn after this.
+            if step.action_type == "submit" and not step.error:
                 if state.current_step + 1 >= state.max_steps:
+                    # End investigation if there would be no steps left after the verifier agent 
                     state.finished = True
                     state.final_answer = step.final_answer
                     state.stop_reason = "max_steps"
                     self.trace_logger.save_case_state(state)
                     break
+
                 # Call Verifier Agent
-                prompt = self.context_builder.build_verifier(state, step.final_answer)
-                common = {"step_id": state.current_step + 1, "prompt": prompt}
-                try:
-                    generated = self.model_runner.generate(prompt)
-                except Exception as exc:
-                    state.history.append(
-                    StepRecord(**common, raw_model_output="", action_type="invalid",
-                                        error=f"ModelRunner error: {exc}")
-                    )
+                self.diagnostic_answer = step.final_answer
+                step = self._run_verifier_step(state)
+                state.history.append(step)
+                state.current_step += 1
+                self.trace_logger.save_case_state(state)
+
+                if step.action_type == "invalid" or step.action_type == "agree":
+                    # End investigation
+                    state.stop_reason = "verifier_error" if step.action_type == "invalid" else "submit"
                     state.finished = True
-                    state.final_answer = step.final_answer
-                    state.stop_reason = "verifier_error"
+                    state.final_answer = self.diagnostic_answer
                     state.current_step += 1
                     self.trace_logger.save_case_state(state)
                     break
-                raw = generated.get("text", "")
-                parsed = self.output_parser.parse(raw)
-                common.update(
-                    raw_model_output=raw,
-                    thought=parsed.get("thought"),
-                    model_latency=generated.get("latency"),
-                    input_tokens=generated.get("input_tokens"),
-                    output_tokens=generated.get("output_tokens"),
-                )  
-                if parsed.get("type") != "tool":
-                    state.history.append(
-                    StepRecord(**common, action_type="invalid", error=parsed.get("error"))
-                    )
-                    state.finished = True
-                    state.final_answer = step.final_answer
-                    state.stop_reason = "verifier_error"
+            
+                if step.action_type == "disagree":
+                    # Provide feedback
                     state.current_step += 1
                     self.trace_logger.save_case_state(state)
-                    break
-        
-                name = parsed["action_name"]
-                arguments = parsed["action_input"]
-                name, arguments = self.hooks.before_action(state, name, arguments)
-                # If agree, finish
-                if (name or "").strip().strip(".").lower() == "agree":
-                    state.history.append(
-                    StepRecord(**common, action_type="submit", action_name=name,
-                    action_input=arguments)
-                    )
-                
-                    state.finished = True
-                    state.final_answer = step.final_answer
-                    state.stop_reason = "submit"
-                    state.current_step += 1
-                    self.trace_logger.save_case_state(state)
-                    break
-                # If disagree, continue
-                else:
-                    state.history.append(
-                    StepRecord(**common, action_type="verifier_response", action_name=name,
-                    action_input=arguments)
-                    )
-                    self.verifier_answer = arguments
-                    state.current_step += 1
-                    self.trace_logger.save_case_state(state)
-                    continue
+                    
+
             self.trace_logger.save_case_state(state)
         if not state.finished:
             state.stop_reason = "max_steps"
@@ -135,7 +96,7 @@ class DoubleAgentHarness:
             )
             return self.hooks.after_action(
                 state,
-                StepRecord(**common, action_type="submit_internal", action_name=name,
+                StepRecord(**common, action_type="submit", action_name=name,
                            action_input=arguments, observation=observation, error=error,
                            final_answer=None if error else json.dumps(arguments, ensure_ascii=False)),
             )
@@ -147,3 +108,38 @@ class DoubleAgentHarness:
                        action_input=arguments, observation=result.get("observation"),
                        error=result.get("error"), tool_latency=result.get("latency")),
         )
+
+
+    def _run_verifier_step(self, state: CaseState) -> StepRecord:
+        prompt = self.context_builder.build_verifier(state, self.diagnostic_answer)
+        common = {"step_id": state.current_step + 1, "prompt": prompt}
+        try:
+            generated = self.model_runner.generate(prompt)
+        except Exception as exc:
+            return StepRecord(**common, raw_model_output="", action_type="invalid",
+                                error=f"ModelRunner error: {exc}")
+            
+        raw = generated.get("text", "")
+        parsed = self.output_parser.parse(raw)
+        common.update(
+            raw_model_output=raw,
+            thought=parsed.get("thought"),
+            model_latency=generated.get("latency"),
+            input_tokens=generated.get("input_tokens"),
+            output_tokens=generated.get("output_tokens"),
+        )  
+        if parsed.get("type") != "tool":
+            return StepRecord(**common, action_type="invalid", error=parsed.get("error"))
+
+        name = parsed["action_name"]
+        arguments = parsed["action_input"]
+        name, arguments = self.hooks.before_action(state, name, arguments)
+
+        if (name or "").strip().strip(".").lower() == "agree":
+            return StepRecord(**common, action_type="agree", action_name=name,
+                action_input=arguments)
+        else: #if disagree
+            self.verifier_answer = arguments
+            return StepRecord(**common, action_type="disagree", action_name=name,
+                            action_input=arguments)
+            
