@@ -15,7 +15,6 @@ from harness.context import ContextBuilder
 from harness.harness import CloudOpsHarness
 from harness.context_double_agent import DoubleAgentContextBuilder
 from harness.double_agent import DoubleAgentHarness
-from runtime.contracts import build_expected_output, build_expected_output_verifier
 from runtime.core import OutputParser, ToolExecutor, TraceLogger, init_case_state, load_config
 from runtime.llm import ModelRunner
 from tools.cloudops import build_tool_registry, create_k8s_tools, render_tools_description
@@ -104,8 +103,7 @@ def run_case(config: Dict[str, Any], case_path: Path, model_runner: ModelRunner)
     )
     context = DoubleAgentContextBuilder(
         tools_description=render_tools_description(registry),
-        expected_output_diagnostic=build_expected_output(tool_system),
-        expected_output_verifier=build_expected_output_verifier(tool_system)
+        system=tool_system
     )
     state = init_case_state(
         case_id=case_id,
