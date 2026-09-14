@@ -1,6 +1,6 @@
 {
-  "Completed": "{\"key_evidence_summary\": \"adservice pod restarted twice; logs show Http2Exception caused by liveness probe performing HTTP GET on gRPC port 9555. Liveness probe is incorrectly configured with httpGet instead of grpc, leading to repeated probe failures and pod restarts.\", \"top_3_predictions\": [{\"rank\": 1, \"fault_object\": \"app/adservice\", \"root_cause\": \"liveness_probe_incorrect_protocol\"}, {\"rank\": 2, \"fault_object\": \"app/adservice\", \"root_cause\": \"readiness_probe_incorrect_protocol\"}, {\"rank\": 3, \"fault_object\": \"app/adservice\", \"root_cause\": \"code_wrong_return\"}]}",
+  "Completed": "{\"key_evidence_summary\": \"The adservice pod has 2 restarts within 30s. The pod description shows a liveness probe configured as http-get to http://:9555/, yet the adservice exposes a gRPC endpoint. Kubelet reports repeated 'Liveness probe failed' events and kills the container, causing restarts.\", \"top_3_predictions\": [{\"rank\": 1, \"fault_object\": \"APP/adservice\", \"root_cause\": \"liveness_probe_incorrect_protocol\"}, {\"rank\": 2, \"fault_object\": \"APP/adservice\", \"root_cause\": \"readiness_probe_incorrect_protocol\"}, {\"rank\": 3, \"fault_object\": \"APP/adservice\", \"root_cause\": \"code_wrong_return\"}]}",
   "finished": true,
-  "stop_reason": "verifier_error",
-  "steps_used": 7
+  "stop_reason": "submit",
+  "steps_used": 11
 }
